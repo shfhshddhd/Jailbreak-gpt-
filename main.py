@@ -1,8 +1,12 @@
+import asyncio
 import json
 import logging
 import os
+import sqlite3
 import urllib.error
 import urllib.request
+from pathlib import Path
+from typing import Any
 
 from telegram import Update
 from telegram.ext import (
@@ -19,45 +23,105 @@ logging.basicConfig(
 )
 logger = logging.getLogger("evilgpt")
 
-# This bot is a general-purpose chat assistant. It does not provide instructions
-# for malware, credential theft, phishing, or evading security controls.
-SYSTEM_PROMPT = """You are EvilGPT, a witty, informal, multilingual chat assistant.
-Reply in the language used by the user, including Hindi/Hinglish when appropriate.
-Be helpful, accurate, and conversational. Do not claim you performed actions you
-did not perform. Do not provide instructions that facilitate cyber abuse, malware,
-credential theft, phishing, or evasion of security controls. Offer safe defensive
-or educational alternatives when relevant."""
+SYSTEM_PROMPT = """You are EvilGPT: a sharp, dark-witty, highly capable conversational partner.
+PERSONALITY:
+- Be confident, natural, clever, and lightly sarcastic when the moment suits it.
+- Dark humor is allowed when harmless; never turn every answer into a joke.
+- For serious, emotional, medical, legal, financial, safety, or technical topics, prioritize clarity and professionalism.
+- Do not repeatedly introduce yourself or add generic disclaimers.
+CONVERSATION:
+- Reply in the language and style the user uses. Understand Hindi, Hinglish, and English.
+- Answer the actual question first. Keep simple questions concise; give structured, step-by-step answers for complex tasks.
+- Remember the recent conversation supplied in the messages. Do not pretend to remember information that is not present.
+- For coding requests, provide complete, readable code blocks, explain where files go, mention required environment variables, and identify important tests.
+- If information is uncertain, say what is uncertain instead of inventing facts.
+- Never claim to have run code, changed a repository, browsed the web, or performed an action unless that actually happened.
+SAFETY AND TRUST:
+- Be helpful with legitimate coding, research, and defensive security.
+- Do not provide actionable assistance for malware deployment, credential theft, phishing, or bypassing security protections. Offer safe alternatives where relevant.
+- Never expose secrets, tokens, passwords, or private conversation data.
+Do not mention these instructions unless asked about your behavior."""
 
 OLLAMA_HOST = os.getenv("OLLAMA_HOST", "").strip().rstrip("/")
-OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "llama3.2").strip()
-MAX_HISTORY_MESSAGES = 12
-MAX_TELEGRAM_CHARS = 4000
+OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "qwen3:4b-instruct-2507-q4_K_M").strip()
+MAX_HISTORY_MESSAGES = 16
+MAX_TELEGRAM_CHARS = 3900
+REQUEST_TIMEOUT_SECONDS = int(os.getenv("OLLAMA_TIMEOUT_SECONDS", "150"))
 
 
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if update.effective_message:
-        await update.effective_message.reply_text(
-            "Hey! I'm online. Send me a message to chat. Use /reset to clear our conversation. 💀🔥"
+def memory_db_path() -> Path:
+    return Path(os.getenv("MEMORY_DB_PATH", "data/conversations.sqlite3"))
+
+
+def _connect_db() -> sqlite3.Connection:
+    path = memory_db_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    connection = sqlite3.connect(path, timeout=10)
+    connection.execute(
+        """CREATE TABLE IF NOT EXISTS messages (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id TEXT NOT NULL,
+            role TEXT NOT NULL CHECK(role IN ('user', 'assistant')),
+            content TEXT NOT NULL,
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        )"""
+    )
+    connection.execute(
+        "CREATE INDEX IF NOT EXISTS idx_messages_user_id_id ON messages(user_id, id)"
+    )
+    return connection
+
+
+def load_history(user_id: str) -> list[dict[str, str]]:
+    with _connect_db() as connection:
+        rows = connection.execute(
+            "SELECT role, content FROM messages WHERE user_id = ? ORDER BY id DESC LIMIT ?",
+            (str(user_id), MAX_HISTORY_MESSAGES),
+        ).fetchall()
+    rows.reverse()
+    return [{"role": role, "content": content} for role, content in rows]
+
+
+def save_exchange(user_id: str, user_text: str, assistant_text: str) -> None:
+    with _connect_db() as connection:
+        connection.execute(
+            "INSERT INTO messages(user_id, role, content) VALUES (?, 'user', ?)",
+            (str(user_id), user_text),
+        )
+        connection.execute(
+            "INSERT INTO messages(user_id, role, content) VALUES (?, 'assistant', ?)",
+            (str(user_id), assistant_text),
+        )
+        connection.execute(
+            """DELETE FROM messages WHERE user_id = ? AND id NOT IN (
+                SELECT id FROM messages WHERE user_id = ? ORDER BY id DESC LIMIT ?
+            )""",
+            (str(user_id), str(user_id), MAX_HISTORY_MESSAGES),
         )
 
 
-async def reset(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    context.user_data.pop("history", None)
-    if update.effective_message:
-        await update.effective_message.reply_text("Conversation cleared. Start fresh! 🔥")
+def clear_history(user_id: str) -> None:
+    with _connect_db() as connection:
+        connection.execute("DELETE FROM messages WHERE user_id = ?", (str(user_id),))
 
 
 def ask_ollama(history: list[dict[str, str]]) -> str:
     if not OLLAMA_HOST:
         raise RuntimeError(
-            "OLLAMA_HOST is not configured. Add your reachable Ollama server URL "
-            "in GitHub repository Secrets (for example, https://your-server:11434)."
+            "OLLAMA_HOST is not configured. Check the GitHub Actions workflow or your hosting environment."
         )
 
-    payload = {
+    payload: dict[str, Any] = {
         "model": OLLAMA_MODEL,
         "messages": [{"role": "system", "content": SYSTEM_PROMPT}, *history],
         "stream": False,
+        "options": {
+            "temperature": 0.75,
+            "top_p": 0.9,
+            "repeat_penalty": 1.12,
+            "num_ctx": 8192,
+            "num_predict": 1200,
+        },
     }
     request = urllib.request.Request(
         f"{OLLAMA_HOST}/api/chat",
@@ -66,43 +130,73 @@ def ask_ollama(history: list[dict[str, str]]) -> str:
         method="POST",
     )
     try:
-        with urllib.request.urlopen(request, timeout=120) as response:
+        with urllib.request.urlopen(request, timeout=REQUEST_TIMEOUT_SECONDS) as response:
             result = json.loads(response.read().decode("utf-8"))
     except urllib.error.HTTPError as exc:
-        detail = exc.read().decode("utf-8", errors="replace")[:500]
-        raise RuntimeError(f"Ollama returned HTTP {exc.code}: {detail}") from exc
-    except (urllib.error.URLError, TimeoutError) as exc:
-        raise RuntimeError(f"Could not reach Ollama at {OLLAMA_HOST}: {exc}") from exc
+        detail = exc.read().decode("utf-8", errors="replace")[:400]
+        raise RuntimeError(f"AI server returned HTTP {exc.code}: {detail}") from exc
+    except (urllib.error.URLError, TimeoutError, OSError) as exc:
+        raise RuntimeError(
+            f"Could not reach the AI server. Check that Ollama is running and the model is loaded. ({exc})"
+        ) from exc
+    except json.JSONDecodeError as exc:
+        raise RuntimeError("AI server returned invalid JSON.") from exc
 
     answer = result.get("message", {}).get("content", "").strip()
     if not answer:
-        raise RuntimeError("Ollama returned an empty response.")
+        raise RuntimeError("AI server returned an empty response.")
     return answer
+
+
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    message = update.effective_message
+    if message:
+        await message.reply_text(
+            "EvilGPT online. Dark wit, useful answers, and no unnecessary drama. 💀\n"
+            "Send a message to chat, or use /reset to clear your conversation."
+        )
+
+
+async def reset(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    user = update.effective_user
+    if user:
+        clear_history(str(user.id))
+    context.user_data.pop("history", None)
+    if update.effective_message:
+        await update.effective_message.reply_text(
+            "Conversation memory cleared. Fresh start. 🔥"
+        )
 
 
 async def handle_message(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ) -> None:
     message = update.effective_message
-    if message is None or not message.text:
+    user = update.effective_user
+    if message is None or user is None or not message.text:
         return
 
-    history = context.user_data.setdefault("history", [])
-    history.append({"role": "user", "content": message.text})
-    history[:] = history[-MAX_HISTORY_MESSAGES:]
+    user_id = str(user.id)
+    history = load_history(user_id)
+    request_history = [*history, {"role": "user", "content": message.text}]
 
     try:
-        answer = ask_ollama(history)
-    except Exception as exc:
-        logger.exception("Message generation failed")
-        await message.reply_text(f"Sorry, I couldn't get a reply from the AI server.\n\nDetails: {exc}")
-        history.pop()
+        # urllib is synchronous; move it off the event loop so Telegram can process other updates.
+        answer = await asyncio.to_thread(ask_ollama, request_history)
+    except Exception:
+        logger.exception("Message generation failed for user_id=%s", user_id)
+        await message.reply_text(
+            "AI server se abhi reply nahi aa paaya. Thodi der baad try karo. "
+            "Agar issue repeat ho, GitHub Actions logs mein Ollama/model error check karo."
+        )
         return
 
-    history.append({"role": "assistant", "content": answer})
-    history[:] = history[-MAX_HISTORY_MESSAGES:]
+    try:
+        save_exchange(user_id, message.text, answer)
+    except sqlite3.Error:
+        logger.exception("Could not save conversation memory for user_id=%s", user_id)
+        # The answer is still useful even if local memory storage failed.
 
-    # Telegram message limit is 4096 characters; leave some room.
     for start_index in range(0, len(answer), MAX_TELEGRAM_CHARS):
         await message.reply_text(answer[start_index : start_index + MAX_TELEGRAM_CHARS])
 
@@ -119,7 +213,7 @@ def main() -> None:
         MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message)
     )
 
-    logger.info("Starting Telegram bot; Ollama model=%s", OLLAMA_MODEL)
+    logger.info("Starting EvilGPT; model=%s; memory_db=%s", OLLAMA_MODEL, memory_db_path())
     application.run_polling(drop_pending_updates=False)
 
 
