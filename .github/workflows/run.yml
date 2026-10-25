@@ -14,12 +14,23 @@ concurrency:
 
 jobs:
   run-bot:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 360
 
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
+
+      - name: Free Runner Disk Space
+        run: |
+          set -euo pipefail
+          echo "Disk and memory before cleanup:"
+          df -h /
+          free -h
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /usr/local/share/chromium
+          echo "Disk and memory after cleanup:"
+          df -h /
+          free -h
 
       - name: Set Up Python
         uses: actions/setup-python@v5
@@ -28,33 +39,61 @@ jobs:
           cache: pip
           cache-dependency-path: requirements.txt
 
-      - name: Install Dependencies
-        run: python -m pip install --upgrade pip -r requirements.txt
+      - name: Install Python Dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
 
-      - name: Install and Start Temporary Ollama
+      - name: Install llama.cpp Runtime (No Ollama)
         run: |
           set -euo pipefail
-          curl -fsSL https://ollama.com/install.sh | sh
-          sudo systemctl enable --now ollama
-          for attempt in $(seq 1 30); do
-            if curl -fsS http://127.0.0.1:11434/api/tags >/dev/null; then
-              echo "Ollama is ready."
-              exit 0
-            fi
-            sleep 2
-          done
-          echo "ERROR: Ollama did not start in time."
-          sudo journalctl -u ollama --no-pager -n 80 || true
-          exit 1
+          curl -LsSf https://llama.app/install.sh | sh
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          export PATH="$HOME/.local/bin:$PATH"
+          command -v llama
+          llama --help
 
-      - name: Download AI Model
+      - name: Start Local OpenAI-Compatible Model Server
         env:
-          OLLAMA_MODEL: ${{ vars.OLLAMA_MODEL || 'llama3.2:1b' }}
+          HF_HOME: /tmp/huggingface
+          LLAMA_ARG_CTX_SIZE: "4096"
         run: |
           set -euo pipefail
-          echo "Using Ollama model: ${OLLAMA_MODEL}"
-          ollama pull "${OLLAMA_MODEL}"
-          curl -fsS http://127.0.0.1:11434/api/tags
+          export PATH="$HOME/.local/bin:$PATH"
+          # This downloads the open-weight GGUF model from Hugging Face.
+          # No OpenAI API key and no Ollama are used.
+          nohup llama serve -hf ggml-org/gpt-oss-20b-GGUF --port 8080 --ctx-size 4096 > /tmp/llama-server.log 2>&1 &
+          echo $! > /tmp/llama-server.pid
+
+          ready=0
+          for attempt in $(seq 1 180); do
+            if curl -fsS http://127.0.0.1:8080/health >/dev/null 2>&1; then
+              ready=1
+              echo "llama.cpp server is ready."
+              break
+            fi
+            if ! kill -0 "$(cat /tmp/llama-server.pid)" 2>/dev/null; then
+              echo "ERROR: llama.cpp server exited during startup."
+              tail -n 160 /tmp/llama-server.log || true
+              exit 1
+            fi
+            sleep 10
+          done
+          if [[ "$ready" != "1" ]]; then
+            echo "ERROR: model server did not become ready in 30 minutes."
+            tail -n 160 /tmp/llama-server.log || true
+            exit 1
+          fi
+
+      - name: Test Local Model Inference
+        run: |
+          set -euo pipefail
+          response="$(curl --fail --silent --show-error --max-time 300 \
+            http://127.0.0.1:8080/v1/chat/completions \
+            -H 'Content-Type: application/json' \
+            -d '{"model":"gpt-oss-20b","messages":[{"role":"user","content":"Say hello in Hindi in one short sentence."}],"max_tokens":100,"stream":false}')"
+          echo "$response"
+          python -c 'import json,sys; d=json.load(sys.stdin); assert d.get("choices") and d["choices"][0].get("message",{}).get("content","").strip(), "Empty model response"' <<< "$response"
 
       - name: Validate Python Syntax
         run: python -m py_compile main.py
@@ -62,8 +101,9 @@ jobs:
       - name: Run Bot
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-          OLLAMA_HOST: http://127.0.0.1:11434
-          OLLAMA_MODEL: ${{ vars.OLLAMA_MODEL || 'llama3.2:1b' }}
+          LLM_API_URL: http://127.0.0.1:8080/v1/chat/completions
+          LLM_MODEL: gpt-oss-20b
+          LLM_TIMEOUT_SECONDS: "300"
           GH_TOKEN: ${{ github.token }}
           GITHUB_REPOSITORY: ${{ github.repository }}
           PYTHONUNBUFFERED: "1"
