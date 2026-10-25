@@ -49,11 +49,11 @@ jobs:
 
       - name: Download AI Model
         env:
-          OLLAMA_MODEL: \${{ vars.OLLAMA_MODEL || 'qwen3:4b-instruct-2507-q4_K_M' }}
+          OLLAMA_MODEL: ${{ vars.OLLAMA_MODEL || 'qwen3:4b-instruct-2507-q4_K_M' }}
         run: |
           set -euo pipefail
-          echo "Using Ollama model: \${OLLAMA_MODEL}"
-          ollama pull "\${OLLAMA_MODEL}"
+          echo "Using Ollama model: ${OLLAMA_MODEL}"
+          ollama pull "${OLLAMA_MODEL}"
           curl -fsS http://127.0.0.1:11434/api/tags
 
       - name: Validate Python Syntax
@@ -66,11 +66,11 @@ jobs:
 
       - name: Run Bot
         env:
-          TELEGRAM_BOT_TOKEN: \${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           OLLAMA_HOST: http://127.0.0.1:11434
-          OLLAMA_MODEL: \${{ vars.OLLAMA_MODEL || 'qwen3:4b-instruct-2507-q4_K_M' }}
+          OLLAMA_MODEL: ${{ vars.OLLAMA_MODEL || 'qwen3:4b-instruct-2507-q4_K_M' }}
           MEMORY_DB_PATH: data/conversations.sqlite3
-          GH_TOKEN: \${{ github.token }}
-          GITHUB_REPOSITORY: \${{ github.repository }}
+          GH_TOKEN: ${{ github.token }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
           PYTHONUNBUFFERED: "1"
         run: bash ./start.sh
