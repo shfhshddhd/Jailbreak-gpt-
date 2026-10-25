@@ -44,7 +44,7 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install -r requirements.txt
 
-      - name: Install llama.cpp Runtime (No Ollama)
+      - name: Install llama.cpp Runtime
         run: |
           set -euo pipefail
           curl -LsSf https://llama.app/install.sh | sh
@@ -61,7 +61,7 @@ jobs:
           set -euo pipefail
           export PATH="$HOME/.local/bin:$PATH"
           # This downloads the open-weight GGUF model from Hugging Face.
-          # No OpenAI API key and no Ollama are used.
+          # No OpenAI API key or hosted inference service is used.
           nohup llama serve -hf ggml-org/gpt-oss-20b-GGUF --port 8080 --ctx-size 4096 > /tmp/llama-server.log 2>&1 &
           echo $! > /tmp/llama-server.pid
 
