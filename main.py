@@ -104,7 +104,7 @@ def save_exchange(user_id: str, user_text: str, assistant_text: str) -> None:
 
 
 def clear_history(user_id: str) -> None:
-    with _connect_db() as connection:
+    with closing(_connect_db()) as connection:
         connection.execute("DELETE FROM messages WHERE user_id = ?", (str(user_id),))
         connection.commit()
 
