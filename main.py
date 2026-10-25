@@ -1,4 +1,5 @@
 import asyncio
+from contextlib import closing
 import json
 import logging
 import os
@@ -69,11 +70,12 @@ def _connect_db() -> sqlite3.Connection:
     connection.execute(
         "CREATE INDEX IF NOT EXISTS idx_messages_user_id_id ON messages(user_id, id)"
     )
+    connection.commit()
     return connection
 
 
 def load_history(user_id: str) -> list[dict[str, str]]:
-    with _connect_db() as connection:
+    with closing(_connect_db()) as connection:
         rows = connection.execute(
             "SELECT role, content FROM messages WHERE user_id = ? ORDER BY id DESC LIMIT ?",
             (str(user_id), MAX_HISTORY_MESSAGES),
@@ -83,7 +85,7 @@ def load_history(user_id: str) -> list[dict[str, str]]:
 
 
 def save_exchange(user_id: str, user_text: str, assistant_text: str) -> None:
-    with _connect_db() as connection:
+    with closing(_connect_db()) as connection:
         connection.execute(
             "INSERT INTO messages(user_id, role, content) VALUES (?, 'user', ?)",
             (str(user_id), user_text),
@@ -98,11 +100,13 @@ def save_exchange(user_id: str, user_text: str, assistant_text: str) -> None:
             )""",
             (str(user_id), str(user_id), MAX_HISTORY_MESSAGES),
         )
+        connection.commit()
 
 
 def clear_history(user_id: str) -> None:
     with _connect_db() as connection:
         connection.execute("DELETE FROM messages WHERE user_id = ?", (str(user_id),))
+        connection.commit()
 
 
 def ask_ollama(history: list[dict[str, str]]) -> str:
