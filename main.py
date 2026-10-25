@@ -1,3 +1,4 @@
+import asyncio
 import json
 import logging
 import os
@@ -28,8 +29,9 @@ did not perform. Do not provide instructions that facilitate cyber abuse, malwar
 credential theft, phishing, or evasion of security controls. Offer safe defensive
 or educational alternatives when relevant."""
 
-OLLAMA_HOST = os.getenv("OLLAMA_HOST", "").strip().rstrip("/")
-OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "llama3.2").strip()
+LLM_API_URL = os.getenv("LLM_API_URL", "http://127.0.0.1:8080/v1/chat/completions").strip().rstrip("/")
+LLM_MODEL = os.getenv("LLM_MODEL", "gpt-oss-20b").strip()
+LLM_TIMEOUT_SECONDS = int(os.getenv("LLM_TIMEOUT_SECONDS", "300"))
 MAX_HISTORY_MESSAGES = 12
 MAX_TELEGRAM_CHARS = 4000
 
@@ -47,36 +49,36 @@ async def reset(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await update.effective_message.reply_text("Conversation cleared. Start fresh! 🔥")
 
 
-def ask_ollama(history: list[dict[str, str]]) -> str:
-    if not OLLAMA_HOST:
-        raise RuntimeError(
-            "OLLAMA_HOST is not configured. Add your reachable Ollama server URL "
-            "in GitHub repository Secrets (for example, https://your-server:11434)."
-        )
+def ask_local_model(history: list[dict[str, str]]) -> str:
+    """Call the local llama.cpp OpenAI-compatible HTTP endpoint."""
+    if not LLM_API_URL:
+        raise RuntimeError("LLM_API_URL is not configured.")
 
     payload = {
-        "model": OLLAMA_MODEL,
+        "model": LLM_MODEL,
         "messages": [{"role": "system", "content": SYSTEM_PROMPT}, *history],
         "stream": False,
+        "temperature": 0.7,
+        "max_tokens": 700,
     }
     request = urllib.request.Request(
-        f"{OLLAMA_HOST}/api/chat",
+        LLM_API_URL,
         data=json.dumps(payload).encode("utf-8"),
         headers={"Content-Type": "application/json"},
         method="POST",
     )
     try:
-        with urllib.request.urlopen(request, timeout=120) as response:
+        with urllib.request.urlopen(request, timeout=LLM_TIMEOUT_SECONDS) as response:
             result = json.loads(response.read().decode("utf-8"))
     except urllib.error.HTTPError as exc:
         detail = exc.read().decode("utf-8", errors="replace")[:500]
-        raise RuntimeError(f"Ollama returned HTTP {exc.code}: {detail}") from exc
+        raise RuntimeError(f"Local model server returned HTTP {exc.code}: {detail}") from exc
     except (urllib.error.URLError, TimeoutError) as exc:
-        raise RuntimeError(f"Could not reach Ollama at {OLLAMA_HOST}: {exc}") from exc
+        raise RuntimeError(f"Could not reach local llama.cpp server at {LLM_API_URL}: {exc}") from exc
 
-    answer = result.get("message", {}).get("content", "").strip()
+    answer = (result.get("choices") or [{}])[0].get("message", {}).get("content", "").strip()
     if not answer:
-        raise RuntimeError("Ollama returned an empty response.")
+        raise RuntimeError("Local model server returned an empty response.")
     return answer
 
 
@@ -92,7 +94,7 @@ async def handle_message(
     history[:] = history[-MAX_HISTORY_MESSAGES:]
 
     try:
-        answer = ask_ollama(history)
+        answer = await asyncio.to_thread(ask_local_model, history)
     except Exception as exc:
         logger.exception("Message generation failed")
         await message.reply_text(f"Sorry, I couldn't get a reply from the AI server.\n\nDetails: {exc}")
@@ -119,7 +121,7 @@ def main() -> None:
         MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message)
     )
 
-    logger.info("Starting Telegram bot; Ollama model=%s", OLLAMA_MODEL)
+    logger.info("Starting Telegram bot; local model=%s; endpoint=%s", LLM_MODEL, LLM_API_URL)
     application.run_polling(drop_pending_updates=False)
 
 
