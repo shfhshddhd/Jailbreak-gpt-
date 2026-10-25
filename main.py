@@ -44,10 +44,10 @@ SAFETY AND TRUST:
 Do not mention these instructions unless asked about your behavior."""
 
 OLLAMA_HOST = os.getenv("OLLAMA_HOST", "").strip().rstrip("/")
-OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "qwen3:4b-instruct-2507-q4_K_M").strip()
+OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "gpt-oss:20b").strip()
 MAX_HISTORY_MESSAGES = 16
 MAX_TELEGRAM_CHARS = 3900
-REQUEST_TIMEOUT_SECONDS = int(os.getenv("OLLAMA_TIMEOUT_SECONDS", "150"))
+REQUEST_TIMEOUT_SECONDS = int(os.getenv("OLLAMA_TIMEOUT_SECONDS", "300"))
 
 
 def memory_db_path() -> Path:
@@ -123,8 +123,8 @@ def ask_ollama(history: list[dict[str, str]]) -> str:
             "temperature": 0.75,
             "top_p": 0.9,
             "repeat_penalty": 1.12,
-            "num_ctx": 8192,
-            "num_predict": 1200,
+            "num_ctx": 4096,
+            "num_predict": 700,
         },
     }
     request = urllib.request.Request(
